@@ -1,0 +1,357 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+using System.Data;
+using Oracle.ManagedDataAccess.Client;
+using Esri.ArcGISRuntime.Geometry;
+using Esri.ArcGISRuntime.Tasks.Geocoding;
+
+
+namespace WLHistoricalDataConversionApp
+{
+    class Program
+    {
+        private static DataTable dt = new DataTable();
+        private static OracleConnection o_dbConnection;
+        private static OracleCommand OC;
+        private static System.Data.SqlClient.SqlConnection dbConnection;
+        private static System.Data.SqlClient.SqlCommand dbCommand;
+        private SpatialReference _SpatialReference = new SpatialReference(Convert.ToInt32(102697));
+        private OnlineLocatorTask _ESRIAddressLocatorTask = new OnlineLocatorTask(new Uri("http://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer"));
+        private OnlineLocatorTask _CUAddressLocatorTask = new OnlineLocatorTask(new Uri("https://gis.cityutil.com/arcgis/rest/services/CUMaps/CU_AddressLocator_GreeneCoParcel_esri/GeocodeServer"));
+        private static double xCoord;
+        private static double yCoord;
+
+        static void Main(string[] args)
+        {
+            o_dbConnection = new OracleConnection();
+            OC = new OracleCommand();
+            OC.Connection = o_dbConnection;
+            OC.CommandType = CommandType.Text;
+
+            //Set the ArcGISRuntime License
+            try
+            {
+                Esri.ArcGISRuntime.ArcGISRuntimeEnvironment.ClientId = "1NTY5FYWOLGLZdwL";
+                Esri.ArcGISRuntime.ArcGISRuntimeEnvironment.Initialize();
+                Esri.ArcGISRuntime.ArcGISRuntimeEnvironment.License.SetLicense("runtimestandard,101,rud243343325,none,HC4XTK8HRBCSA1GJH152");
+            }
+            catch (Exception)
+            {
+                throw;
+            }
+
+            ConnectToOracleDatabase();
+            ConnectToWLK();
+            PullDataFromOracle();
+
+
+        }
+
+        private static void ConnectToOracleDatabase()
+        {
+            try
+            {
+                string connectionString = "User ID=Wlkadm;Password=wlkadmpwforprod;Data Source=APPSPRD;";
+                o_dbConnection.ConnectionString = connectionString;
+
+                o_dbConnection.Open();
+
+                var testConnection = o_dbConnection.State;
+            }
+            catch (OracleException oex)
+            {
+                Console.WriteLine(oex.Message);
+                System.IO.StreamWriter objWriter = new System.IO.StreamWriter(Properties.Settings.Default.logPath, true);
+                objWriter.WriteLine("Database connection FAILED. " + oex.Message + System.DateTime.Now);
+                objWriter.Close();
+                throw;
+            }
+        }
+
+        private static void ConnectToWLK()
+        {
+            try
+            {
+                dbConnection = new System.Data.SqlClient.SqlConnection("Data Source=vmsql14to1\\cuwlkappt;Initial Catalog=WLKDEV; Integrated Security=True");
+
+                dbConnection.Open();
+
+                var testConnection = dbConnection.State;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine(ex.Message);
+                System.IO.StreamWriter objWriter = new System.IO.StreamWriter(Properties.Settings.Default.logPath, true);
+                objWriter.WriteLine(ex.Message + System.DateTime.Now + "\n");
+                objWriter.Close();
+                throw;
+            }          
+        }
+
+        private static void PullDataFromOracle()
+        {
+            int prevID = 0;
+            OC.CommandText = Properties.Settings.Default.singleSqlStatement;
+            OracleDataReader row = OC.ExecuteReader();
+            dt.Load(row);         
+
+            dbCommand = dbConnection.CreateCommand();
+
+            Program program = new Program();
+
+            for (int i = 0; i <= dt.Rows.Count; i++)
+             {
+
+                DateTime reportedDTM = Convert.ToDateTime(dt.Rows[i].ItemArray[4]);
+                reportedDTM = DateTimeCheck(reportedDTM);
+
+
+                DateTime repairedDTM = Convert.ToDateTime(dt.Rows[i].ItemArray[5]);
+                repairedDTM = DateTimeCheck(repairedDTM);
+
+                DateTime processedDTM = Convert.ToDateTime(dt.Rows[i].ItemArray[6]);
+                processedDTM = DateTimeCheck(processedDTM);
+
+
+                int tempLeakType_ID = Convert.ToInt16(dt.Rows[i].ItemArray[10]);
+
+                switch (tempLeakType_ID)
+                {
+                    case 1:
+                        tempLeakType_ID = 4;
+                        break;
+
+                    case 2:
+                        tempLeakType_ID = 3;
+                        break;
+
+                    case 3:
+                        tempLeakType_ID = 5;
+                        break;
+                }
+
+                string address = dt.Rows[i].ItemArray[2].ToString();
+                string remarks = dt.Rows[i].ItemArray[12].ToString();
+                string reportedBy = dt.Rows[i].ItemArray[3].ToString();
+                string repairCrew = dt.Rows[i].ItemArray[7].ToString();              
+
+                if (Convert.ToInt64(dt.Rows[i].ItemArray[0]) != prevID)
+                {
+                    try
+                    {
+                        program.SearchForAddress(address);
+
+                        if (address.Contains("'"))
+                        {
+                           address = address.Replace("'", "''");
+                        }
+
+                        if (remarks.Contains("'"))
+                        {
+                            remarks = remarks.Replace("'", "''");
+                        }
+
+                        if (reportedBy.Contains("'"))
+                        {
+                            reportedBy = reportedBy.Replace("'", "''");
+                        }
+
+                        if (repairCrew.Contains("'"))
+                        {
+                            repairCrew = repairCrew.Replace("'", "''");
+                        }
+
+
+                        dbCommand.CommandText = "SET IDENTITY_INSERT WATERLEAK_MASTER ON; INSERT INTO dbo.WATERLEAK_MASTER (LEAK_ID, LEAKTYPE_ID, CURRENT_JOBTYPE_ID, STATUS_ID, X, Y, ADDRESS," +
+                            " REPORTED_BY, REPORTED_DTM, REPAIRED_DTM, COMPLETED_DTM," +
+                            " REPAIR_CREW_ID, MAP_NUMBER_KEY, CAUSE_ID," +
+                            " REPAIRTYPE_ID, REPAIRMETHOD_ID, FINAL_COMMENTS) VALUES (" + Convert.ToInt64(dt.Rows[i].ItemArray[0]) + ", " + tempLeakType_ID + ", " + tempLeakType_ID + ", " + Convert.ToInt16(dt.Rows[i].ItemArray[1]) +
+                            ", " + xCoord + ", " + yCoord + ", '" + address + "', '" + reportedBy + "', '" + reportedDTM +
+                            "', '" + repairedDTM + "', '" + processedDTM + "', '" + repairCrew +
+                            "', " + dt.Rows[i].ItemArray[8].ToString() + ", " + Convert.ToInt16(dt.Rows[i].ItemArray[9]) + ", " + Convert.ToInt16(dt.Rows[i].ItemArray[10]) +
+                            ", " + Convert.ToInt16(dt.Rows[i].ItemArray[11]) + ", '" + remarks + "')";
+
+                        prevID = Convert.ToInt32(dt.Rows[i].ItemArray[0]);
+
+                        dbCommand.ExecuteNonQuery();
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine(ex.Message + "LEAK ID: " + Convert.ToInt64(dt.Rows[i].ItemArray[0]));
+                        System.IO.StreamWriter objWriter = new System.IO.StreamWriter(Properties.Settings.Default.logPath, true);
+                        objWriter.WriteLine(ex.Message + "LEAK ID: " + " --- " + Convert.ToInt64(dt.Rows[i].ItemArray[0]) + System.DateTime.Now + "\n");
+                        objWriter.Close();
+                    }
+                }
+                else
+                {
+
+                }
+                                                          
+            }
+            
+        }
+
+        private static DateTime DateTimeCheck(DateTime date)
+        {
+            try
+            {
+                string year = date.Year.ToString().PadLeft(4, '0');
+
+                if (Convert.ToInt16(year) > 0 && Convert.ToInt16(year) < 1900)
+                {
+                    string endChars = year.Substring(2, 2);
+                    year = 20 + endChars;
+                }
+                else
+                {
+                    return date;
+                }
+
+                DateTime newDate = new DateTime(Convert.ToInt16(year), date.Month, date.Day, date.Hour, date.Minute, date.Second);
+
+
+                return newDate;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine(ex.Message + "LEAK ID: " + Convert.ToInt64(dt.Rows[i].ItemArray[0]));
+                System.IO.StreamWriter objWriter = new System.IO.StreamWriter(Properties.Settings.Default.logPath, true);
+                objWriter.WriteLine(ex.Message + "LEAK ID: " + " --- " + Convert.ToInt64(dt.Rows[i].ItemArray[0]) + System.DateTime.Now + "\n");
+                objWriter.Close();
+                return date;
+            }           
+        }
+
+        private LocatorFindResult SearchForAddress(string strAddress)
+        {
+            IList<LocatorFindResult> objResultList = null;
+            LocatorFindResult objResult = null;
+
+            if (!string.IsNullOrEmpty(strAddress))
+            {
+                //First, search for the address using ESRI's address locator service
+                Task.Run(async () =>
+                {
+                    objResultList = await GeocodeAddressESRI(strAddress);
+                }).Wait();
+
+                if (objResultList.Count > 0)
+                {
+                    foreach (LocatorFindResult result in objResultList)
+                    {
+                        if (Convert.ToInt32(result.Feature.Attributes["Score"]) >= 85)
+                        {
+                            objResult = result;
+                            break;
+                        }
+                    }
+                }
+
+                if (objResult == null)
+                {
+                    //Second, search for the address using CU's address locator service
+                    Task.Run(async () =>
+                    {
+                        //CHANGED FROM objReturnList
+                        objResultList = await GeocodeAddressCU(strAddress);
+                    }).Wait();
+
+                    if (objResultList.Count > 0)
+                    {
+                        foreach (LocatorFindResult result in objResultList)
+                        {
+                            if (Convert.ToInt32(result.Feature.Attributes["Score"]) >= 85)
+                            {
+                                objResult = result;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+
+            try
+            {
+                MapPoint mp = objResult.Feature.Geometry as MapPoint;
+
+                xCoord = mp.X;
+                yCoord = mp.Y;
+            }
+            catch (Exception)
+            {
+                xCoord = 0;
+                yCoord = 0;
+            }
+
+            return objResult;
+        }
+
+        //ESRI Locator
+        private async Task<IList<LocatorFindResult>> GeocodeAddressESRI(string strAddress)
+        {
+            IList<LocatorFindResult> results = null;
+
+            try
+            {
+                var objFindParameters = new OnlineLocatorFindParameters(strAddress);
+                objFindParameters.OutSpatialReference = _SpatialReference;
+                objFindParameters.MaxLocations = 10;
+
+                var objGeometry = new Envelope(1356868.386, 456703.165, 1476226.025, 568465.318, _SpatialReference);
+
+                var searchExtent = GeometryEngine.Project(objGeometry, _SpatialReference);
+                objFindParameters.SearchExtent = searchExtent as Envelope;
+
+                var objOutFields = new List<string> { "Score", "Match_addr" };
+                objFindParameters.OutFields = objOutFields;
+
+                var task = _ESRIAddressLocatorTask.FindAsync(objFindParameters, new System.Threading.CancellationToken());
+
+                //Execute the task
+                results = await task;
+            }
+            catch (Exception)
+            {
+                throw;
+            }
+
+            return results;
+        }
+
+        //CU Locator
+        private async Task<IList<LocatorFindResult>> GeocodeAddressCU(string strAddress)
+        {
+            IList<LocatorFindResult> results = null;
+
+            try
+            {
+                //Output values
+                var objFindParameters = new OnlineLocatorFindParameters(strAddress);
+                objFindParameters.OutSpatialReference = _SpatialReference;
+                objFindParameters.MaxLocations = 10;
+
+                //var searchExtent = GeometryEngine.Project(objGeometry, _SpatialReference);
+                //objFindParameters.SearchExtent = searchExtent as Envelope;
+
+                var objOutFields = new List<string> { "Score", "Match_addr" };
+                objFindParameters.OutFields = objOutFields;
+
+                var task = _CUAddressLocatorTask.FindAsync(objFindParameters, new System.Threading.CancellationToken());
+
+                //Execute the task
+                results = await task;
+            }
+            catch (Exception)
+            {
+                throw;
+            }
+
+            return results;
+        }
+    }
+}
